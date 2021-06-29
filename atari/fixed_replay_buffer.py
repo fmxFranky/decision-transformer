@@ -2,14 +2,16 @@
 
 import collections
 from concurrent import futures
-from dopamine.replay_memory import circular_replay_buffer
+
+import gin
 import numpy as np
 import tensorflow.compat.v1 as tf
-import gin
+from dopamine.replay_memory import circular_replay_buffer
 
 gfile = tf.gfile
 
 STORE_FILENAME_PREFIX = circular_replay_buffer.STORE_FILENAME_PREFIX
+
 
 class FixedReplayBuffer(object):
   """Object composed of a list of OutofGraphReplayBuffers."""
@@ -70,14 +72,17 @@ class FixedReplayBuffer(object):
       # terminal and invalid_range
       ckpt_suffixes = [x for x in ckpt_counters if ckpt_counters[x] in [6, 7]]
       if num_buffers is not None:
-        ckpt_suffixes = np.random.choice(
-            ckpt_suffixes, num_buffers, replace=False)
+        ckpt_suffixes = np.random.choice(ckpt_suffixes,
+                                         num_buffers,
+                                         replace=False)
       self._replay_buffers = []
       # Load the replay buffers in parallel
       with futures.ThreadPoolExecutor(
           max_workers=num_buffers) as thread_pool_executor:
-        replay_futures = [thread_pool_executor.submit(
-            self._load_buffer, suffix) for suffix in ckpt_suffixes]
+        replay_futures = [
+            thread_pool_executor.submit(self._load_buffer, suffix)
+            for suffix in ckpt_suffixes
+        ]
       for f in replay_futures:
         replay_buffer = f.result()
         if replay_buffer is not None:

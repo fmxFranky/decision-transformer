@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+
 from decision_transformer.training.trainer import Trainer
 
 
@@ -28,10 +29,10 @@ class SequenceTrainer(Trainer):
     loss = self.loss_fn(
         None,
         action_preds,
-        None,
+        reward_preds,
         None,
         action_target,
-        None,
+        rtg[:, :-1],
     )
 
     self.optimizer.zero_grad()

@@ -1,3 +1,13 @@
+atari/outputs/
+atari/multirun/
+atari/.amlt*
+atari/amlt/
+*/amlt_submits/
+atari/amlt*.yaml
+atari/submit_to_amlk8s.sh
 .vscode/
 __pycache__/
 dqn_replay/
+dt_atari_runs*/
+gym/data/*.pkl
+gym/mjkey.txt

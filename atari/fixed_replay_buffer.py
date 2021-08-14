@@ -1,9 +1,9 @@
 # source: https://github.com/google-research/batch_rl/blob/master/batch_rl/fixed_replay/replay_memory/fixed_replay_buffer.py
 
 import collections
+import logging
 from concurrent import futures
 
-import gin
 import numpy as np
 import tensorflow.compat.v1 as tf
 from dopamine.replay_memory import circular_replay_buffer
@@ -54,7 +54,7 @@ class FixedReplayBuffer(object):
       replay_buffer = circular_replay_buffer.OutOfGraphReplayBuffer(
           *self._args, **self._kwargs)
       replay_buffer.load(self._data_dir, suffix)
-      tf.logging.info('Loaded replay buffer ckpt {} from {}'.format(
+      logging.info('Loaded replay buffer ckpt {} from {}'.format(
           suffix, self._data_dir))
       # pytype: enable=attribute-error
       return replay_buffer

@@ -18,14 +18,13 @@ GPT model:
 
 import logging
 import math
+import random
 
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
 logger = logging.getLogger(__name__)
-
-import numpy as np
 
 
 class GELU(nn.Module):
@@ -39,6 +38,11 @@ class GPTConfig:
   embd_pdrop = 0.1
   resid_pdrop = 0.1
   attn_pdrop = 0.1
+  n_regmask = 2
+  mask_mode = 'zero'
+  traj_pmask = 0.15
+  reg_coef = 5
+  n_atom = 101
 
   def __init__(self, vocab_size, block_size, **kwargs):
     self.vocab_size = vocab_size
@@ -153,7 +157,8 @@ class GPT(nn.Module):
     self.blocks = nn.Sequential(*[Block(config) for _ in range(config.n_layer)])
     # decoder head
     self.ln_f = nn.LayerNorm(config.n_embd)
-    self.head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+    self.action_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+    self.rtg_head = nn.Linear(config.n_embd, config.n_atom)
 
     self.block_size = config.block_size
     self.apply(self._init_weights)
@@ -225,7 +230,7 @@ class GPT(nn.Module):
               ) == 0, "parameters %s made it into both decay/no_decay sets!" % (
                   str(inter_params),)
     assert len(param_dict.keys() - union_params) == 0, "parameters %s were not separated into either decay/no_decay set!" \
-                                                % (str(param_dict.keys() - union_params), )
+        % (str(param_dict.keys() - union_params), )
 
     # create the pytorch optimizer object
     optim_groups = [
@@ -244,10 +249,16 @@ class GPT(nn.Module):
     return optimizer
 
   # state, action, and return
-  def forward(self, states, actions, targets=None, rtgs=None, timesteps=None):
+  def forward(self,
+              states,
+              actions,
+              target_actions=None,
+              rtgs=None,
+              target_rtgs=None,
+              timesteps=None):
     # states: (batch, block_size, 4*84*84)
     # actions: (batch, block_size, 1)
-    # targets: (batch, block_size, 1)
+    # target_actions: (batch, block_size, 1)
     # rtgs: (batch, block_size, 1)
     # timesteps: (batch, block_size, 1)
 
@@ -264,15 +275,17 @@ class GPT(nn.Module):
           actions.type(torch.long).squeeze(-1))  # (batch, block_size, n_embd)
 
       token_embeddings = torch.zeros(
-          (states.shape[0], states.shape[1] * 3 - int(targets is None),
+          (states.shape[0], states.shape[1] * 3 - int(target_actions is None),
            self.config.n_embd),
           dtype=torch.float32,
           device=state_embeddings.device)
       token_embeddings[:, ::3, :] = rtg_embeddings
       token_embeddings[:, 1::3, :] = state_embeddings
-      token_embeddings[:, 2::3, :] = action_embeddings[:, -states.shape[1] +
-                                                       int(targets is None):, :]
-    elif actions is None and self.model_type == 'reward_conditioned':  # only happens at very first timestep of evaluation
+      token_embeddings[:,
+                       2::3, :] = action_embeddings[:, -states.shape[1] + int(
+                           target_actions is None):, :]
+    # only happens at very first timestep of evaluation
+    elif actions is None and self.model_type == 'reward_conditioned':
       rtg_embeddings = self.ret_emb(rtgs.type(torch.float32))
 
       token_embeddings = torch.zeros(
@@ -286,17 +299,19 @@ class GPT(nn.Module):
           actions.type(torch.long).squeeze(-1))  # (batch, block_size, n_embd)
 
       token_embeddings = torch.zeros(
-          (states.shape[0], states.shape[1] * 2 - int(targets is None),
+          (states.shape[0], states.shape[1] * 2 - int(target_actions is None),
            self.config.n_embd),
           dtype=torch.float32,
           device=state_embeddings.device)
       token_embeddings[:, ::2, :] = state_embeddings
-      token_embeddings[:, 1::2, :] = action_embeddings[:, -states.shape[1] +
-                                                       int(targets is None):, :]
-    elif actions is None and self.model_type == 'naive':  # only happens at very first timestep of evaluation
+      token_embeddings[:,
+                       1::2, :] = action_embeddings[:, -states.shape[1] + int(
+                           target_actions is None):, :]
+    # only happens at very first timestep of evaluation
+    elif actions is None and self.model_type == 'naive':
       token_embeddings = state_embeddings
     else:
-      raise NotImplementedError()
+      raise NotImplementedError
 
     batch_size = states.shape[0]
     all_global_pos_emb = torch.repeat_interleave(
@@ -309,26 +324,90 @@ class GPT(nn.Module):
             timesteps, self.config.n_embd,
             dim=-1)) + self.pos_emb[:, :token_embeddings.shape[1], :]
 
-    x = self.drop(token_embeddings + position_embeddings)
-    x = self.blocks(x)
-    x = self.ln_f(x)
-    logits = self.head(x)
+    seq_x = [self.drop(token_embeddings + position_embeddings)]
+    for i in range(self.config.n_regmask):
+      seq_x.append(
+          trajectory_mask(seq_x[0],
+                          mode=self.config.mask_mode,
+                          prob=self.config.traj_pmask))
+    seq_logits = []
+    for x in seq_x:
+      seq_logits.append(self.action_head(self.ln_f(self.blocks(x))))
+      if actions is not None and self.model_type == 'reward_conditioned':
+        seq_logits[-1] = seq_logits[
+            -1][:, 1::3, :]  # only keep predictions from state_embeddings
+      elif actions is None and self.model_type == 'reward_conditioned':
+        seq_logits[-1] = seq_logits[-1][:, 1:, :]
+      elif actions is not None and self.model_type == 'naive':
+        seq_logits[-1] = seq_logits[
+            -1][:, ::2, :]  # only keep predictions from state_embeddings
+      elif actions is None and self.model_type == 'naive':
+        seq_logits[-1] = seq_logits[-1]  # for completeness
+      else:
+        raise NotImplementedError()
 
-    if actions is not None and self.model_type == 'reward_conditioned':
-      logits = logits[:, 1::3, :]  # only keep predictions from state_embeddings
-    elif actions is None and self.model_type == 'reward_conditioned':
-      logits = logits[:, 1:, :]
-    elif actions is not None and self.model_type == 'naive':
-      logits = logits[:, ::2, :]  # only keep predictions from state_embeddings
-    elif actions is None and self.model_type == 'naive':
-      logits = logits  # for completeness
-    else:
-      raise NotImplementedError()
-
-    # if we are given some desired targets also calculate the loss
+    # if we are given some desired target_actions also calculate the loss
     loss = None
-    if targets is not None:
-      loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)),
-                             targets.reshape(-1))
+    if target_actions is not None:
+      assert len(seq_logits) > 0
+      if self.config.n_regmask == 0:
+        loss = F.cross_entropy(
+            seq_logits[0].reshape(-1, seq_logits[0].size(-1)),
+            target_actions.reshape(-1))
+      elif self.config.n_regmask > 1:
+        loss = 0
+        for i in range(len(seq_x)):
+          ce_loss = F.cross_entropy(
+              seq_logits[i].reshape(-1, seq_logits[i].size(-1)),
+              target_actions.reshape(-1))
+          loss += ce_loss
+          for j in range(i + 1, len(seq_x)):
+            kl_loss = compute_kl_loss(seq_logits[i], seq_logits[j])
+            loss += self.config.reg_coef * kl_loss
+        loss /= len(seq_x)
+    # if target_rtgs is not None:
 
-    return logits, loss
+    return seq_logits[0], loss
+
+
+def trajectory_mask(trajectories, mode='zero', prob=0.15):
+  # trajectories: (batch, block_size, n_embd)
+  masked_trajectories = trajectories.clone()
+  batch_size, block_size, n_embd = trajectories.shape
+  for i in range(batch_size):
+    for j in range(block_size):
+      p = random.random()
+      if p < prob:
+        if mode == 'zero':
+          masked_trajectories[i, j] = 0
+        elif mode == 'noise':
+          noise = torch.normal(mean=0,
+                               std=0.1,
+                               size=[n_embd],
+                               device=trajectories.device)
+          masked_trajectories[i, j] += noise
+        else:
+          raise NotImplementedError()
+  return masked_trajectories
+
+
+def compute_kl_loss(p, q, pad_mask=None):
+
+  p_loss = F.kl_div(F.log_softmax(p, dim=-1),
+                    F.softmax(q, dim=-1),
+                    reduction='none')
+  q_loss = F.kl_div(F.log_softmax(q, dim=-1),
+                    F.softmax(p, dim=-1),
+                    reduction='none')
+
+  # pad_mask is for seq-level tasks
+  if pad_mask is not None:
+    p_loss.masked_fill_(pad_mask, 0.)
+    q_loss.masked_fill_(pad_mask, 0.)
+
+  # You can choose whether to use function "sum" and "mean" depending on your task
+  p_loss = p_loss.sum()
+  q_loss = q_loss.sum()
+
+  loss = (p_loss + q_loss) / 2
+  return loss

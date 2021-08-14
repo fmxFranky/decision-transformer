@@ -4,13 +4,12 @@ channels:
 dependencies:
 - python=3.8.5
 - anaconda
-- cudatoolkit=10.
+- cudatoolkit=11.
 - numpy
 - pip
 - pip:
-  - gym==0.18.3
-  - mujoco-py==2.0.2.13
-  - numpy==1.20.3
-  - torch==1.8.1
-  - transformers==4.5.1
-  - wandb==0.9.1
+  - gym
+  - mujoco-py
+  - torch
+  - transformers
+  - wandb

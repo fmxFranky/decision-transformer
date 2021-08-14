@@ -12,7 +12,6 @@ import random
 
 import numpy as np
 import torch
-import torch.nn as nn
 from torch.nn import functional as F
 
 
@@ -62,7 +61,7 @@ def sample(model,
                                         3:]  # crop context if needed
     logits, _ = model(x_cond,
                       actions=actions,
-                      targets=None,
+                      target_actions=None,
                       rtgs=rtgs,
                       timesteps=timesteps)
     # pluck the logits at the final step and scale by temperature

@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import transformers
+
 from decision_transformer.models.model import TrajectoryModel
 from decision_transformer.models.trajectory_gpt2 import GPT2Model
 
@@ -18,6 +19,7 @@ class DecisionTransformer(TrajectoryModel):
                max_length=None,
                max_ep_len=4096,
                action_tanh=True,
+               predict_categorical_return=False,
                **kwargs):
     super().__init__(state_dim, act_dim, max_length=max_length)
 
@@ -43,7 +45,11 @@ class DecisionTransformer(TrajectoryModel):
     self.predict_action = nn.Sequential(
         *([nn.Linear(hidden_size, self.act_dim)] +
           ([nn.Tanh()] if action_tanh else [])))
-    self.predict_return = torch.nn.Linear(hidden_size, 1)
+    if predict_categorical_return:
+      assert 'n_atom' in kwargs.keys()
+      self.predict_return = torch.nn.Linear(hidden_size, kwargs['n_atom'])
+    else:
+      self.predict_return = torch.nn.Linear(hidden_size, 1)
 
   def forward(self,
               states,

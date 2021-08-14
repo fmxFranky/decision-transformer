@@ -128,4 +128,4 @@ dependencies:
     - urllib3==1.26.6
     - werkzeug==2.0.1
     - yapf==0.31.0
-prefix: /home/v-mfeng/.conda/envs/decision-transformer-atari
+

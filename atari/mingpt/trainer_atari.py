@@ -17,21 +17,21 @@ import math
 
 import numpy as np
 import torch
-import torch.optim as optim
-from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data.dataloader import DataLoader
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
+import os
 import random
 from collections import deque
 
 import atari_py
 import cv2
 import torch
+import wandb
+
 from mingpt.utils import sample
-from PIL import Image
 
 
 class TrainerConfig:
@@ -47,8 +47,14 @@ class TrainerConfig:
   warmup_tokens = 375e6  # these two numbers come from the GPT-3 paper, but may not be good defaults elsewhere
   final_tokens = 260e9  # (at what point we reach 10% of original LR)
   # checkpoint settings
-  ckpt_path = None
-  num_workers = 0  # for DataLoader
+  save_results = False
+  save_ckpt = False
+  save_prefix = 'ckpt'
+  root_dir = None
+  # for DataLoader
+  num_workers = 0
+  prog_bar = True
+  log_interval = 100
 
   def __init__(self, **kwargs):
     for k, v in kwargs.items():
@@ -69,12 +75,17 @@ class Trainer:
       self.device = torch.cuda.current_device()
       self.model = torch.nn.DataParallel(self.model).to(self.device)
 
+    if config.save_ckpt or config.save_results:
+      os.makedirs(config.root_dir, exist_ok=True)
+
   def save_checkpoint(self):
     # DataParallel wrappers keep raw model object in .module attribute
     raw_model = self.model.module if hasattr(self.model,
                                              "module") else self.model
-    logger.info("saving %s", self.config.ckpt_path)
-    # torch.save(raw_model.state_dict(), self.config.ckpt_path)
+    filename = os.path.join(self.config.root_dir,
+                            f"{self.config.save_prefix}.pt")
+    logger.info(f"saving model to {filename}")
+    torch.save(raw_model.state_dict(), filename)
 
   def train(self):
     model, config = self.model, self.config
@@ -92,8 +103,9 @@ class Trainer:
                           num_workers=config.num_workers)
 
       losses = []
-      pbar = tqdm(enumerate(loader),
-                  total=len(loader)) if is_train else enumerate(loader)
+      pbar = enumerate(loader) if is_train else enumerate(loader)
+      if self.config.prog_bar:
+        pbar = tqdm(pbar, total=len(loader))
       for it, (x, y, r, t) in pbar:
 
         # place data on the correct device
@@ -105,9 +117,9 @@ class Trainer:
         # forward the model
         with torch.set_grad_enabled(is_train):
           # logits, loss = model(x, y, r)
-          logits, loss = model(x, y, y, r, t)
-          loss = loss.mean(
-          )  # collapse all losses if they are scattered on multiple gpus
+          logits, loss = model(x, y, y, r, r, t)
+          # collapse all losses if they are scattered on multiple gpus
+          loss = loss.mean()  
           losses.append(loss.item())
 
         if is_train:
@@ -138,13 +150,23 @@ class Trainer:
             lr = config.learning_rate
 
           # report progress
-          pbar.set_description(
-              f"epoch {epoch+1} iter {it}: train loss {loss.item():.5f}. lr {lr:e}"
-          )
+          description = "".join([
+              f"epoch {epoch+1} iter {it}: ",
+              f"train loss {loss.item():.5f} lr {lr:e}"
+          ])
+          if self.config.prog_bar:
+            pbar.set_description(description)
+          if it % self.config.log_interval == 0 or it == len(loader) - 1:
+            if not self.config.prog_bar:
+              logging.info(description)
+            if self.config.use_wandb:
+              wandb.log({'train loss': loss.item(), 'lr': lr})
 
       if not is_train:
         test_loss = float(np.mean(losses))
         logger.info("test loss: %f", test_loss)
+        if self.config.use_wandb:
+          wandb.log({'test loss': test_loss})
         return test_loss
 
     # best_loss = float('inf')
@@ -161,7 +183,7 @@ class Trainer:
 
       # # supports early stopping based on the test loss, or just save always if no test set is provided
       # good_model = self.test_dataset is None or test_loss < best_loss
-      # if self.config.ckpt_path is not None and good_model:
+      # if self.config.save_ckpt and good_model:
       #     best_loss = test_loss
       #     self.save_checkpoint()
 
@@ -181,6 +203,21 @@ class Trainer:
           raise NotImplementedError()
       else:
         raise NotImplementedError()
+      best_return = max(best_return, eval_return)
+
+      if self.config.save_results:
+        filename = os.path.join(self.config.root_dir,
+                                f"{self.config.save_prefix}.txt")
+        logging.info(f"saving results to {filename}")
+        with open(filename, "a+") as fout:
+          fout.write(f"{eval_return}\n")
+
+      if self.config.save_ckpt:
+        if best_return < eval_return or not os.path.exists(
+            f"{self.config.root_dir}/{self.config.save_prefix}.pt"):
+          self.save_checkpoint()
+      if self.config.use_wandb:
+        wandb.log({"eval return": eval_return, "best return": best_return})
 
   def get_returns(self, ret):
     self.model.train(False)
@@ -244,7 +281,7 @@ class Trainer:
                 (1, 1, 1), dtype=torch.int64).to(self.device)))
     env.close()
     eval_return = sum(T_rewards) / 10.
-    print("target return: %d, eval return: %d" % (ret, eval_return))
+    logging.info("target return: %d, eval return: %d" % (ret, eval_return))
     self.model.train(True)
     return eval_return
 
@@ -339,7 +376,8 @@ class Env():
     cv2.waitKey(1)
 
   def close(self):
-    cv2.destroyAllWindows()
+    # cv2.destroyAllWindows()
+    pass
 
 
 class Args:

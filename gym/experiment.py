@@ -1,11 +1,15 @@
 import argparse
+import os
 import pickle
 import random
-import sys
+import uuid
 
+import d4rl
 import numpy as np
 import torch
 import wandb
+
+import gym
 from decision_transformer.evaluation.evaluate_episodes import (
     evaluate_episode, evaluate_episode_rtg)
 from decision_transformer.models.decision_transformer import \
@@ -13,8 +17,8 @@ from decision_transformer.models.decision_transformer import \
 from decision_transformer.models.mlp_bc import MLPBCModel
 from decision_transformer.training.act_trainer import ActTrainer
 from decision_transformer.training.seq_trainer import SequenceTrainer
-
-import gym
+import pandas as pd
+import torch.nn.functional as F
 
 
 def discount_cumsum(x, gamma):
@@ -35,25 +39,25 @@ def experiment(
   env_name, dataset = variant['env'], variant['dataset']
   model_type = variant['model_type']
   group_name = f'{exp_prefix}-{env_name}-{dataset}'
-  exp_prefix = f'{group_name}-{random.randint(int(1e5), int(1e6) - 1)}'
+  exp_prefix = f'{group_name}-{uuid.uuid4().hex[:8]}'
 
   if env_name == 'hopper':
     env = gym.make('Hopper-v3')
     max_ep_len = 1000
-    env_targets = [3600, 1800]  # evaluation conditioning targets
+    env_targets = list(np.arange(1, 8) * 900)  # evaluation conditioning targets
     scale = 1000.  # normalization for rewards/returns
   elif env_name == 'halfcheetah':
     env = gym.make('HalfCheetah-v3')
     max_ep_len = 1000
-    env_targets = [12000, 6000]
+    env_targets = list(np.arange(1, 8) * 2000)
     scale = 1000.
   elif env_name == 'walker2d':
     env = gym.make('Walker2d-v3')
     max_ep_len = 1000
-    env_targets = [5000, 2500]
+    env_targets = list(np.arange(1, 8) * 1250)
     scale = 1000.
   elif env_name == 'reacher2d':
-    from trajectory_bert.envs.reacher_2d import Reacher2dEnv
+    from decision_transformer.envs.reacher_2d import Reacher2dEnv
     env = Reacher2dEnv()
     max_ep_len = 100
     env_targets = [76, 40]
@@ -61,9 +65,21 @@ def experiment(
   else:
     raise NotImplementedError
 
+  def seed_everything(seed: int):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = True
+    env.seed(seed)
+
+  seed_everything(variant['seed'])
+
   if model_type == 'bc':
-    env_targets = env_targets[:
-                              1]  # since BC ignores target, no need for different evaluations
+    # since BC ignores target, no need for different evaluations
+    env_targets = env_targets[:1]
 
   state_dim = env.observation_space.shape[0]
   act_dim = env.action_space.shape[0]
@@ -186,7 +202,7 @@ def experiment(
   def eval_episodes(target_rew):
 
     def fn(model):
-      returns, lengths = [], []
+      returns, normalized_scores, lengths = [], [], []
       for _ in range(num_eval_episodes):
         with torch.no_grad():
           if model_type == 'dt':
@@ -217,12 +233,22 @@ def experiment(
                 device=device,
             )
         returns.append(ret)
+        normalized_scores.append(
+            d4rl.get_normalized_score(f'{env_name}-{dataset}-v2', ret) * 100)
         lengths.append(length)
       return {
-          f'target_{target_rew}_return_mean': np.mean(returns),
-          f'target_{target_rew}_return_std': np.std(returns),
-          f'target_{target_rew}_length_mean': np.mean(lengths),
-          f'target_{target_rew}_length_std': np.std(lengths),
+          f'target_{target_rew}_return_mean':
+              np.mean(returns),
+          f'target_{target_rew}_return_std':
+              np.std(returns),
+          f'target_{target_rew}_normalized_score_mean(%)':
+              np.mean(normalized_scores),
+          f'target_{target_rew}_normalized_score_std':
+              np.std(normalized_scores),
+          f'target_{target_rew}_length_mean':
+              np.mean(lengths),
+          f'target_{target_rew}_length_std':
+              np.std(lengths),
       }
 
     return fn
@@ -236,6 +262,8 @@ def experiment(
         hidden_size=variant['embed_dim'],
         n_layer=variant['n_layer'],
         n_head=variant['n_head'],
+        predict_categorical_return=variant['predict_categorical_return'],
+        n_atom=51,
         n_inner=4 * variant['embed_dim'],
         activation_function=variant['activation_function'],
         n_positions=1024,
@@ -264,6 +292,23 @@ def experiment(
   scheduler = torch.optim.lr_scheduler.LambdaLR(
       optimizer, lambda steps: min((steps + 1) / warmup_steps, 1))
 
+  def loss_fn(s_hat, a_hat, r_hat, s, a, r):
+    loss = F.mse_loss(a_hat, a)
+    if variant["add_aux_rloss"]:
+      if variant["predict_categorical_return"]:
+        linspace = np.linspace(np.min(returns)/ scale,
+                               np.max(returns) / scale, variant['n_atom'])
+        np_r = r.clone().flatten().cpu().numpy()
+        np_r_labels = pd.cut(np_r, bins=linspace, include_lowest=True).codes
+        r_labels = torch.tensor(np_r_labels).to(r.device).long()
+        r_hat = r_hat.view(-1, variant['n_atom'])
+        loss += variant['aux_rloss_coeff'] * F.cross_entropy(r_hat, r_labels)
+      else:
+        loss += variant['aux_rloss_coeff'] * F.mse_loss(r_hat, r)
+    # if variant["add_aux_sloss"]:
+    #   loss += variant['aux_sloss_coeff'] * F.mse_loss(s_hat, s)
+    return loss
+
   if model_type == 'dt':
     trainer = SequenceTrainer(
         model=model,
@@ -271,7 +316,7 @@ def experiment(
         batch_size=batch_size,
         get_batch=get_batch,
         scheduler=scheduler,
-        loss_fn=lambda s_hat, a_hat, r_hat, s, a, r: torch.mean((a_hat - a)**2),
+        loss_fn=loss_fn,
         eval_fns=[eval_episodes(tar) for tar in env_targets],
     )
   elif model_type == 'bc':
@@ -288,7 +333,7 @@ def experiment(
   if log_to_wandb:
     wandb.init(name=exp_prefix,
                group=group_name,
-               project='decision-transformer',
+               project=variant['wandb_project_name'],
                config=variant)
     # wandb.watch(model)  # wandb has some bug
 
@@ -310,6 +355,7 @@ if __name__ == '__main__':
       '--mode', type=str,
       default='normal')  # normal for standard setting, delayed for sparse
   parser.add_argument('--K', type=int, default=20)
+  parser.add_argument('--seed', type=int, default=123)
   parser.add_argument('--pct_traj', type=float, default=1.)
   parser.add_argument('--batch_size', type=int, default=64)
   parser.add_argument(
@@ -327,7 +373,22 @@ if __name__ == '__main__':
   parser.add_argument('--max_iters', type=int, default=10)
   parser.add_argument('--num_steps_per_iter', type=int, default=10000)
   parser.add_argument('--device', type=str, default='cuda')
-  parser.add_argument('--log_to_wandb', '-w', type=bool, default=False)
+  parser.add_argument('--log_to_wandb',
+                      '-w',
+                      action='store_true',
+                      default=False)
+  parser.add_argument('--wandb_project_name',
+                      type=str,
+                      default='decision-transformer')
+
+  parser.add_argument('--predict_categorical_return',
+                      action='store_true',
+                      default=False)
+  parser.add_argument('--add_aux_rloss', action='store_true', default=False)
+  parser.add_argument('--add_aux_sloss', action='store_true', default=False)
+  parser.add_argument('--n_atom', type=int, default=51)
+  parser.add_argument('--aux_rloss_coeff', type=float, default=1.0)
+  parser.add_argument('--aux_sloss_coeff', type=float, default=1.0)
 
   args = parser.parse_args()
 

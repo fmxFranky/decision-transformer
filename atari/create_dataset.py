@@ -1,22 +1,10 @@
-import argparse
-import csv
 import logging
-import math
-import pickle
-import random
-from collections import deque
+import os
 
-import blosc
 import numpy as np
-import torch
-import torch.nn as nn
+
 from fixed_replay_buffer import FixedReplayBuffer
-from mingpt.model_atari import GPT, GPTConfig
-from mingpt.trainer_atari import Trainer, TrainerConfig
 # make deterministic
-from mingpt.utils import sample, set_seed
-from torch.nn import functional as F
-from torch.utils.data import Dataset
 
 
 def create_dataset(num_buffers, num_steps, game, data_dir_prefix,
@@ -33,9 +21,10 @@ def create_dataset(num_buffers, num_steps, game, data_dir_prefix,
   while len(obss) < num_steps:
     buffer_num = np.random.choice(np.arange(50 - num_buffers, 50), 1)[0]
     i = transitions_per_buffer[buffer_num]
-    print('loading from buffer %d which has %d already loaded' %
-          (buffer_num, i))
-    frb = FixedReplayBuffer(data_dir=data_dir_prefix + game + '/1/replay_logs',
+    logging.info('loading from buffer %d which has %d already loaded' %
+                 (buffer_num, i))
+    data_dir = os.path.join(data_dir_prefix, game, '1/replay_logs')
+    frb = FixedReplayBuffer(data_dir=data_dir,
                             replay_suffix=buffer_num,
                             observation_shape=(84, 84),
                             stack_size=4,
@@ -74,7 +63,7 @@ def create_dataset(num_buffers, num_steps, game, data_dir_prefix,
           done = True
       num_trajectories += (trajectories_per_buffer - trajectories_to_load)
       transitions_per_buffer[buffer_num] = i
-    print(
+    logging.info(
         'this buffer has %d loaded transitions and there are now %d transitions total divided into %d trajectories'
         % (i, len(obss), num_trajectories))
 
@@ -93,7 +82,7 @@ def create_dataset(num_buffers, num_steps, game, data_dir_prefix,
       rtg_j = curr_traj_returns[j - start_index:i + 1 - start_index]
       rtg[j] = sum(rtg_j)  # includes i
     start_index = i + 1
-  print('max rtg is %d' % max(rtg))
+  logging.info(f"max rtg is {max(rtg)}, min rtg is {min(rtg)}")
 
   # -- create timestep dataset
   start_index = 0
@@ -102,6 +91,6 @@ def create_dataset(num_buffers, num_steps, game, data_dir_prefix,
     i = int(i)
     timesteps[start_index:i + 1] = np.arange(i + 1 - start_index)
     start_index = i + 1
-  print('max timestep is %d' % max(timesteps))
+  logging.info('max timestep is %d' % max(timesteps))
 
-  return obss, actions, returns, done_idxs, rtg, timesteps
+  return obss, actions, returns, done_idxs, rtg, timesteps, min(rtg), max(rtg)

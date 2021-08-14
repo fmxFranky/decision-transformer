@@ -1,42 +1,17 @@
-import argparse
-import csv
 import logging
-import math
-import pickle
-import random
-from collections import deque
+import os
 
-import blosc
+import hydra
 import numpy as np
 import torch
-import torch.nn as nn
+import wandb
+from omegaconf import DictConfig, OmegaConf
+from torch.utils.data import Dataset
+
 from create_dataset import create_dataset
 from mingpt.model_atari import GPT, GPTConfig
 from mingpt.trainer_atari import Trainer, TrainerConfig
-# make deterministic
-from mingpt.utils import sample, set_seed
-from torch.nn import functional as F
-from torch.utils.data import Dataset
-
-parser = argparse.ArgumentParser()
-parser.add_argument('--seed', type=int, default=123)
-parser.add_argument('--context_length', type=int, default=30)
-parser.add_argument('--epochs', type=int, default=5)
-parser.add_argument('--model_type', type=str, default='reward_conditioned')
-parser.add_argument('--num_steps', type=int, default=500000)
-parser.add_argument('--num_buffers', type=int, default=50)
-parser.add_argument('--game', type=str, default='Breakout')
-parser.add_argument('--batch_size', type=int, default=128)
-#
-parser.add_argument(
-    '--trajectories_per_buffer',
-    type=int,
-    default=10,
-    help='Number of trajectories to sample from each of the buffers.')
-parser.add_argument('--data_dir_prefix', type=str, default='./dqn_replay/')
-args = parser.parse_args()
-
-set_seed(args.seed)
+from mingpt.utils import set_seed
 
 
 class StateActionReturnDataset(Dataset):
@@ -75,43 +50,83 @@ class StateActionReturnDataset(Dataset):
     return states, actions, rtgs, timesteps
 
 
-obss, actions, returns, done_idxs, rtgs, timesteps = create_dataset(
-    args.num_buffers, args.num_steps, args.game, args.data_dir_prefix,
-    args.trajectories_per_buffer)
+@hydra.main(config_path="./", config_name="config")
+def run(cfg: DictConfig) -> None:
+  set_seed(cfg.seed)
 
-# set up logging
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
-    datefmt="%m/%d/%Y %H:%M:%S",
-    level=logging.INFO,
-)
+  if cfg.save_dir is None:
+    root_dir = os.getcwd(),
+  elif os.path.isabs(cfg.save_dir):
+    root_dir = cfg.save_dir
+  else:
+    root_dir = os.path.join(hydra.utils.get_original_cwd(),
+                            os.path.relpath(cfg.save_dir))
 
-train_dataset = StateActionReturnDataset(obss, args.context_length * 3, actions,
-                                         done_idxs, rtgs, timesteps)
+  if cfg.use_wandb:
+    wandb.init(project=cfg.wandb_project_name,
+               name=cfg.run_name,
+               config=cfg._content)
 
-mconf = GPTConfig(train_dataset.vocab_size,
-                  train_dataset.block_size,
-                  n_layer=6,
-                  n_head=8,
-                  n_embd=128,
-                  model_type=args.model_type,
-                  max_timestep=max(timesteps))
-model = GPT(mconf)
+  if not os.path.isabs(cfg.data_dir_prefix):
+    cfg.data_dir_prefix = os.path.join(hydra.utils.get_original_cwd(),
+                                       os.path.relpath(cfg.data_dir_prefix))
 
-# initialize a trainer instance and kick off training
-epochs = args.epochs
-tconf = TrainerConfig(max_epochs=epochs,
-                      batch_size=args.batch_size,
-                      learning_rate=6e-4,
-                      lr_decay=True,
-                      warmup_tokens=512 * 20,
-                      final_tokens=2 * len(train_dataset) *
-                      args.context_length * 3,
-                      num_workers=4,
-                      seed=args.seed,
-                      model_type=args.model_type,
-                      game=args.game,
-                      max_timestep=max(timesteps))
-trainer = Trainer(model, train_dataset, None, tconf)
+  obss, actions, returns, done_idxs, rtgs, timesteps, min_rtg, max_rtg = create_dataset(
+      cfg.num_buffers, cfg.num_steps, cfg.game, cfg.data_dir_prefix,
+      cfg.trajectories_per_buffer)
 
-trainer.train()
+  # set up logging
+  logging.basicConfig(
+      format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+      datefmt="%m/%d/%Y %H:%M:%S",
+      level=logging.INFO,
+  )
+
+  train_dataset = StateActionReturnDataset(obss, cfg.context_length * 3,
+                                           actions, done_idxs, rtgs, timesteps)
+
+  mconf = GPTConfig(train_dataset.vocab_size,
+                    train_dataset.block_size,
+                    n_layer=cfg.n_layer,
+                    n_head=cfg.n_head,
+                    n_embd=cfg.n_embd,
+                    model_type=cfg.model_type,
+                    embd_pdrop=cfg.embd_pdrop,
+                    resid_pdrop=cfg.resid_pdrop,
+                    attn_pdrop=cfg.attn_pdrop,
+                    max_timestep=max(timesteps),
+                    n_regmask=cfg.n_regmask,
+                    mask_mode=cfg.mask_mode,
+                    traj_pmask=cfg.traj_pmask,
+                    reg_coef=cfg.reg_coef)
+
+  model = GPT(mconf)
+
+  # initialize a trainer instance and kick off training
+  epochs = cfg.epochs
+  final_tokens = 2 * len(train_dataset) * cfg.context_length * 3
+  tconf = TrainerConfig(max_epochs=epochs,
+                        batch_size=cfg.batch_size,
+                        learning_rate=6e-4,
+                        lr_decay=True,
+                        warmup_tokens=512 * 20,
+                        final_tokens=final_tokens,
+                        num_workers=os.cpu_count(),
+                        seed=cfg.seed,
+                        model_type=cfg.model_type,
+                        game=cfg.game,
+                        max_timestep=max(timesteps),
+                        use_wandb=cfg.use_wandb,
+                        save_results=cfg.save_results,
+                        save_ckpt=cfg.save_ckpt,
+                        root_dir=root_dir,
+                        save_prefix=cfg.run_name,
+                        prog_bar=cfg.prog_bar,
+                        log_interval=cfg.log_interval)
+  trainer = Trainer(model, train_dataset, None, tconf)
+
+  trainer.train()
+
+
+if __name__ == "__main__":
+  run()

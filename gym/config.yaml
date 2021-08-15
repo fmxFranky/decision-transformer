@@ -1,0 +1,26 @@
+exp_prefix: gym-experiments
+env: hopper
+dataset: medium # medium, medium-replay, medium-expert, expert
+K: 20
+seed: 123
+pct_traj: 1.0
+batch_size: 64
+model_type: dt # dt for decision transformer, bc for behavior cloning
+embed_dim: 128
+n_layer: 3
+n_head: 1
+activation_function: relu
+dropout: 0.1
+learning_rate: 1e-4
+weight_decay: 1e-4
+warmup_steps: 10000
+num_eval_episodes: 100
+max_iters: 10
+num_steps_per_iter: 10000
+device: cuda
+log_to_wandb: false
+wandb_project_name: decision-transformer-gym
+add_aux_rloss: false
+predict_categorical_return: false
+n_atom: 51
+aux_rloss_coeff: 1.0

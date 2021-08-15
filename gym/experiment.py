@@ -5,9 +5,13 @@ import random
 import uuid
 
 import d4rl
+import hydra
 import numpy as np
+import pandas as pd
 import torch
+import torch.nn.functional as F
 import wandb
+from omegaconf import DictConfig
 
 import gym
 from decision_transformer.evaluation.evaluate_episodes import (
@@ -17,8 +21,6 @@ from decision_transformer.models.decision_transformer import \
 from decision_transformer.models.mlp_bc import MLPBCModel
 from decision_transformer.training.act_trainer import ActTrainer
 from decision_transformer.training.seq_trainer import SequenceTrainer
-import pandas as pd
-import torch.nn.functional as F
 
 
 def discount_cumsum(x, gamma):
@@ -29,10 +31,9 @@ def discount_cumsum(x, gamma):
   return discount_cumsum
 
 
-def experiment(
-    exp_prefix,
-    variant,
-):
+@hydra.main(config_path="./", config_name="config")
+def experiment(variant: DictConfig) -> None:
+  exp_prefix = variant['exp_prefix']
   device = variant.get('device', 'cuda')
   log_to_wandb = variant.get('log_to_wandb', False)
 
@@ -86,7 +87,7 @@ def experiment(
   act_dim = env.action_space.shape[0]
 
   # load dataset
-  dataset_path = f'data/{env_name}-{dataset}-v2.pkl'
+  dataset_path = f'{hydra.utils.get_original_cwd()}/data/{env_name}-{dataset}-v2.pkl'
   with open(dataset_path, 'rb') as f:
     trajectories = pickle.load(f)
 
@@ -264,7 +265,7 @@ def experiment(
         n_layer=variant['n_layer'],
         n_head=variant['n_head'],
         predict_categorical_return=variant['predict_categorical_return'],
-        n_atom=51,
+        n_atom=variant["n_atom"],
         n_inner=4 * variant['embed_dim'],
         activation_function=variant['activation_function'],
         n_positions=1024,
@@ -301,7 +302,8 @@ def experiment(
             np.min(returns) / scale,
             np.max(returns) / scale, variant['n_atom'])
         np_r = r.clone().flatten().cpu().numpy()
-        np_r_labels = pd.cut(np_r, bins=linspace, include_lowest=True).codes
+        np_r_labels = np.array(pd.cut(np_r, bins=linspace).codes)
+        np_r_labels[np_r_labels == -1] = 0
         r_labels = torch.tensor(np_r_labels).to(r.device).long()
         r_hat = r_hat.view(-1, variant['n_atom'])
         loss += variant['aux_rloss_coeff'] * F.cross_entropy(r_hat, r_labels)
@@ -347,51 +349,5 @@ def experiment(
       wandb.log(outputs)
 
 
-if __name__ == '__main__':
-  parser = argparse.ArgumentParser()
-  parser.add_argument('--env', type=str, default='hopper')
-  parser.add_argument(
-      '--dataset', type=str,
-      default='medium')  # medium, medium-replay, medium-expert, expert
-  parser.add_argument(
-      '--mode', type=str,
-      default='normal')  # normal for standard setting, delayed for sparse
-  parser.add_argument('--K', type=int, default=20)
-  parser.add_argument('--seed', type=int, default=123)
-  parser.add_argument('--pct_traj', type=float, default=1.)
-  parser.add_argument('--batch_size', type=int, default=64)
-  parser.add_argument(
-      '--model_type', type=str,
-      default='dt')  # dt for decision transformer, bc for behavior cloning
-  parser.add_argument('--embed_dim', type=int, default=128)
-  parser.add_argument('--n_layer', type=int, default=3)
-  parser.add_argument('--n_head', type=int, default=1)
-  parser.add_argument('--activation_function', type=str, default='relu')
-  parser.add_argument('--dropout', type=float, default=0.1)
-  parser.add_argument('--learning_rate', '-lr', type=float, default=1e-4)
-  parser.add_argument('--weight_decay', '-wd', type=float, default=1e-4)
-  parser.add_argument('--warmup_steps', type=int, default=10000)
-  parser.add_argument('--num_eval_episodes', type=int, default=100)
-  parser.add_argument('--max_iters', type=int, default=10)
-  parser.add_argument('--num_steps_per_iter', type=int, default=10000)
-  parser.add_argument('--device', type=str, default='cuda')
-  parser.add_argument('--log_to_wandb',
-                      '-w',
-                      action='store_true',
-                      default=False)
-  parser.add_argument('--wandb_project_name',
-                      type=str,
-                      default='decision-transformer')
-
-  parser.add_argument('--predict_categorical_return',
-                      action='store_true',
-                      default=False)
-  parser.add_argument('--add_aux_rloss', action='store_true', default=False)
-  parser.add_argument('--add_aux_sloss', action='store_true', default=False)
-  parser.add_argument('--n_atom', type=int, default=51)
-  parser.add_argument('--aux_rloss_coeff', type=float, default=1.0)
-  parser.add_argument('--aux_sloss_coeff', type=float, default=1.0)
-
-  args = parser.parse_args()
-
-  experiment('gym-experiment', variant=vars(args))
+if __name__ == "__main__":
+  experiment()

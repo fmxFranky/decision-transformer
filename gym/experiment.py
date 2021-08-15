@@ -44,17 +44,18 @@ def experiment(
   if env_name == 'hopper':
     env = gym.make('Hopper-v3')
     max_ep_len = 1000
-    env_targets = list(np.arange(1, 8) * 900)  # evaluation conditioning targets
+    # evaluation conditioning targets
+    env_targets = list(range(1800, 3600 + 900, 900))
     scale = 1000.  # normalization for rewards/returns
   elif env_name == 'halfcheetah':
     env = gym.make('HalfCheetah-v3')
     max_ep_len = 1000
-    env_targets = list(np.arange(1, 8) * 2000)
+    env_targets = list(range(6000, 12000 + 2000, 2000))
     scale = 1000.
   elif env_name == 'walker2d':
     env = gym.make('Walker2d-v3')
     max_ep_len = 1000
-    env_targets = list(np.arange(1, 8) * 1250)
+    env_targets = list(range(2500, 5000 + 500, 500))
     scale = 1000.
   elif env_name == 'reacher2d':
     from decision_transformer.envs.reacher_2d import Reacher2dEnv
@@ -296,8 +297,9 @@ def experiment(
     loss = F.mse_loss(a_hat, a)
     if variant["add_aux_rloss"]:
       if variant["predict_categorical_return"]:
-        linspace = np.linspace(np.min(returns)/ scale,
-                               np.max(returns) / scale, variant['n_atom'])
+        linspace = np.linspace(
+            np.min(returns) / scale,
+            np.max(returns) / scale, variant['n_atom'])
         np_r = r.clone().flatten().cpu().numpy()
         np_r_labels = pd.cut(np_r, bins=linspace, include_lowest=True).codes
         r_labels = torch.tensor(np_r_labels).to(r.device).long()

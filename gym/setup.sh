@@ -31,7 +31,7 @@ export MUJOCO_KEY_PATH="$HOME/.mujoco$MUJOCO_KEY_PATH"
 
 conda install ruamel.yaml flake8 yapf -y
 pip install --upgrade scikit-image absl-py tb-nightly pyparsing imageio-ffmpeg termcolor 
-pip install --upgrade hydra-core gym kornia wandb mujoco_py transformers numpy
+pip install --upgrade hydra-core gym kornia wandb mujoco_py transformers numpy pandas
 pip install git+https://github.com/rail-berkeley/d4rl@master#egg=d4rl
 
 wandb login 31ce01e4120061694da54a54ab0dafbee1262420

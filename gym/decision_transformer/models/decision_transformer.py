@@ -93,9 +93,11 @@ class DecisionTransformer(TrajectoryModel):
     transformer_outputs = self.transformer(
         inputs_embeds=stacked_inputs,
         attention_mask=stacked_attention_mask,
+        output_attentions=True
     )
     x = transformer_outputs['last_hidden_state']
-
+    attentions = transformer_outputs["attentions"]
+  
     # reshape x so that the second dimension corresponds to the original
     # returns (0), states (1), or actions (2); i.e. x[:,1,t] is the token for s_t
     x = x.reshape(batch_size, seq_length, 3,
@@ -109,7 +111,7 @@ class DecisionTransformer(TrajectoryModel):
     action_preds = self.predict_action(x[:,
                                          1])  # predict next action given state
 
-    return state_preds, action_preds, return_preds
+    return state_preds, action_preds, return_preds, attentions
 
   def get_action(self, states, actions, rewards, returns_to_go, timesteps,
                  **kwargs):
@@ -160,7 +162,7 @@ class DecisionTransformer(TrajectoryModel):
     else:
       attention_mask = None
 
-    _, action_preds, return_preds = self.forward(states,
+    _, action_preds, return_preds, _ = self.forward(states,
                                                  actions,
                                                  None,
                                                  returns_to_go,

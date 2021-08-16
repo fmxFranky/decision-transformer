@@ -11,3 +11,4 @@ dqn_replay/
 dt_atari_runs*/
 gym/data/*.pkl
 gym/mjkey.txt
+gym/outputs/

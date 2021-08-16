@@ -338,14 +338,32 @@ def experiment(variant: DictConfig) -> None:
     wandb.init(name=exp_prefix,
                group=group_name,
                project=variant['wandb_project_name'],
-               config=variant)
+               config=variant._content)
     # wandb.watch(model)  # wandb has some bug
 
-  for iter in range(variant['max_iters']):
+  for i in range(variant['max_iters']):
     outputs = trainer.train_iteration(num_steps=variant['num_steps_per_iter'],
-                                      iter_num=iter + 1,
+                                      iter_num=i + 1,
                                       print_logs=True)
     if log_to_wandb:
+      with torch.no_grad():
+        states, actions, rewards, _, rtg, timesteps, attention_mask = get_batch(
+            1)
+        _, _, _, attentions = model.forward(
+            states,
+            actions,
+            rewards,
+            rtg[:, :-1],
+            timesteps,
+            attention_mask=attention_mask,
+        )
+        for j in range(len(attentions)):
+          wandb.log({
+              f'epoch_{i}_attention_{j}':
+                  wandb.plots.HeatMap(
+                      range(K * 3), range(K * 3),
+                      attentions[j].squeeze().detach().cpu().numpy())
+          })
       wandb.log(outputs)
 
 

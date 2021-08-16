@@ -11,7 +11,7 @@ class SequenceTrainer(Trainer):
         self.batch_size)
     action_target = torch.clone(actions)
 
-    state_preds, action_preds, reward_preds = self.model.forward(
+    state_preds, action_preds, reward_preds, attentions = self.model.forward(
         states,
         actions,
         rewards,
